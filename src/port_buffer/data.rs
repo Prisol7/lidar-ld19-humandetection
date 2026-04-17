@@ -10,8 +10,9 @@ pub(super) struct Package {
     crc: u8,                     // CRC 校验
 }
 
-pub(super) struct Points<'a> {
-    slice: &'a [Point],
+pub(super) struct DecodedPoints {
+    data: [Point; LEN as usize],
+    index: usize,
     angle: u16,
     angle_each: u16,
     min_confidence: u8,
@@ -24,22 +25,19 @@ const LEN: u8 = 12;
 
 impl Package {
     /// 解码
-    pub fn decode(buf: &[u8], min_confidence: u8) -> Option<Points<'_>> {
-        // 转换
-        Some(unsafe { &*(buf.as_ptr() as *const Self) })
-            // 校验
-            .filter(|points| {
-                points.head == HEAD
-                    && points.len & 0x1F == LEN
-                    && points.crc == cal_crc8(&buf[..buf.len() - 1])
-            })
-            // 使用引用构造迭代器
-            .map(|package| Points {
-                slice: &package.data,
-                angle: package.angle_s,
-                angle_each: package.angle_each(),
-                min_confidence,
-            })
+    pub fn decode(buf: &[u8], min_confidence: u8) -> Option<DecodedPoints> {
+        let pkg: Self = unsafe { (buf.as_ptr() as *const Self).read_unaligned() };
+        if pkg.head != HEAD || pkg.len & 0x1F != LEN || pkg.crc != cal_crc8(&buf[..buf.len() - 1]) {
+            return None;
+        }
+        let angle_each = pkg.angle_each();
+        Some(DecodedPoints {
+            data: pkg.data,
+            angle: pkg.angle_s,
+            angle_each,
+            index: 0,
+            min_confidence,
+        })
     }
 
     /// 查找一个包头
@@ -54,7 +52,7 @@ impl Package {
     #[inline]
     fn angle_each(&self) -> u16 {
         let diff = if self.angle_e < self.angle_s {
-            self.angle_e + crate::CONFIG.dir_round - self.angle_s
+            self.angle_e + crate::DIR_ROUND - self.angle_s
         } else {
             self.angle_e - self.angle_s
         };
@@ -65,7 +63,7 @@ impl Package {
 impl Point {
     #[inline]
     fn len(&self) -> u16 {
-        unsafe { *(self.0.as_ptr() as *const u16) }
+        unsafe { (self.0.as_ptr() as *const u16).read_unaligned() }
     }
 
     #[inline]
@@ -74,29 +72,24 @@ impl Point {
     }
 }
 
-impl Iterator for Points<'_> {
+impl Iterator for DecodedPoints {
     type Item = crate::Point;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.slice {
-            [] => None,
-            [p, rest @ ..] => {
-                if self.angle >= crate::CONFIG.dir_round {
-                    self.angle -= crate::CONFIG.dir_round;
-                }
-                let dir = self.angle;
-                self.angle += self.angle_each;
-                self.slice = rest;
-                Some(crate::Point {
-                    len: if p.confidence() < self.min_confidence {
-                        0
-                    } else {
-                        p.len()
-                    },
-                    dir,
-                })
-            }
+        if self.index >= self.data.len() {
+            return None;
         }
+        let p = &self.data[self.index];
+        self.index += 1;
+        if self.angle >= crate::DIR_ROUND {
+            self.angle -= crate::DIR_ROUND;
+        }
+        let dir = self.angle;
+        self.angle += self.angle_each;
+        Some(crate::Point {
+            len: if p.confidence() < self.min_confidence { 0 } else { p.len() },
+            dir,
+        })
     }
 }
 

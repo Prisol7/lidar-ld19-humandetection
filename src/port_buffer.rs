@@ -3,7 +3,7 @@ mod data;
 use std::collections::VecDeque;
 
 use data::Package;
-use lidar::Point;
+use crate::Point;
 
 const LEN: usize = std::mem::size_of::<Package>();
 
@@ -42,9 +42,9 @@ impl Iterator for PortBuffer {
             Some(p)
         } else if self.cursor == LEN {
             self.cursor = 0;
-            if let Some(mut points) = Package::decode(&self.buffer, self.min_confidence) {
-                let result = points.next();
-                self.points.extend(points);
+            if let Some(mut decoded) = Package::decode(&self.buffer, self.min_confidence) {
+                let result = decoded.next();
+                self.points.extend(decoded);
                 result
             } else if let Some(n) = Package::search_head(&self.buffer[1..]) {
                 self.buffer.copy_within(n + 1.., 0);
