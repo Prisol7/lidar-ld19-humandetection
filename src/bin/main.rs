@@ -101,6 +101,9 @@ fn main() {
                     scan.clusters = analyze(&foreground, &classifier);
                     log_features_csv(TRAINING_CSV, &scan.clusters);
                     update_tracks(&mut tracks, &mut scan.clusters);
+                    if let Some(angle) = closest_human_angle(&scan.clusters) {
+                        println!("human @ {:.1}°", angle);
+                    }
                 } else {
                     scan.clusters.clear();
                     tracks.clear();
@@ -132,6 +135,22 @@ fn main() {
             scan.points.push((x, y, is_motion));
         }
     }
+}
+
+fn closest_human_angle(clusters: &[Cluster]) -> Option<f64> {
+    clusters
+        .iter()
+        .filter(|c| c.is_human)
+        .min_by(|a, b| {
+            let da = a.centroid.0.hypot(a.centroid.1);
+            let db = b.centroid.0.hypot(b.centroid.1);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|c| {
+            let (x, y) = c.centroid;
+            let deg = y.atan2(x).to_degrees();
+            if deg < 0.0 { deg + 360.0 } else { deg }
+        })
 }
 
 // FIXME: crude "once human, always human" sticky tracker — see comment at the
