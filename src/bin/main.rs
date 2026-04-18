@@ -17,10 +17,11 @@ const MODEL_PATH: &str = "human_rf.bin";
 const TRAINING_CSV: &str = "training_data.csv";
 
 // FIXME: replace this crude nearest-centroid sticky-tracker with a proper
-// multi-object tracker (e.g. Kalman filter + Hungarian assignment, or SORT).
-// Today a cluster that was ever classified human stays "human" as long as
-// *any* cluster keeps appearing within TRACK_MATCH_M of its last centroid,
-// which will happily latch onto a different object that wanders through.
+// multi-object tracker 
+// Today a cluster that was ever classified human stayshuman as long as
+// any cluster keeps appearing within TRACK_MATCH_M of its last  centroid
+// which will happily latch onto a different object that wanders through
+//so REPLACE later, right now it is very poorly matching humans 
 const TRACK_MATCH_M: f64 = 0.40;
 const TRACK_TTL_SCANS: u32 = 30;
 
@@ -296,8 +297,11 @@ fn draw_smile(buf: &mut Vec<u32>, cx: isize, cy: isize, color: u32) {
 }
 
 fn plot(buf: &mut Vec<u32>, cx: f64, cy: f64, scale: f64, x: f64, y: f64, r: isize, color: u32) {
-    let px = (cx + x * scale).round() as isize;
-    let py = (cy - y * scale).round() as isize;
+    let x_rot = -y;
+    let y_rot = x;
+
+    let px = (cx + x_rot/2.0 * scale).round() as isize;
+    let py = (cy - y_rot/2.0 * scale).round() as isize;
     fill_dot(buf, px, py, r, color);
 }
 
