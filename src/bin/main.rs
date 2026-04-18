@@ -20,6 +20,9 @@ const TRAINING_CSV: &str = "training_data.csv";
 const PWM_FREQ_HZ: f64 = 1_000.0;
 const PWM_IDLE_DUTY: f64 = 0.5;
 
+const NOISE_RADIUS_M: f64 = 0.12;
+const NOISE_MIN_NEIGHBORS: usize = 2;
+
 // FIXME: replace this crude nearest-centroid sticky-tracker with a proper
 // multi-object tracker 
 // Today a cluster that was ever classified human stayshuman as long as
@@ -99,6 +102,7 @@ fn main() {
             if wrapped {
                 phase = maybe_finish_calibration(phase);
                 if matches!(phase, Phase::Detecting { .. }) {
+                    denoise_motion(&mut scan.points);
                     let foreground: Vec<(f64, f64)> = scan
                         .points
                         .iter()
@@ -163,6 +167,33 @@ fn closest_human_angle(clusters: &[Cluster]) -> Option<f64> {
             let (x, y) = c.centroid;
             y.atan2(x).to_degrees().clamp(0.0, 180.0)
         })
+}
+
+fn denoise_motion(points: &mut [(f64, f64, bool)]) {
+    let motion_idx: Vec<usize> = points
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.2)
+        .map(|(i, _)| i)
+        .collect();
+    let r2 = NOISE_RADIUS_M * NOISE_RADIUS_M;
+    let mut keep = vec![false; motion_idx.len()];
+    for (a, &ia) in motion_idx.iter().enumerate() {
+        let (ax, ay, _) = points[ia];
+        let mut neighbors = 0;
+        for (b, &ib) in motion_idx.iter().enumerate() {
+            if a == b { continue; }
+            let (bx, by, _) = points[ib];
+            if (ax - bx).powi(2) + (ay - by).powi(2) <= r2 {
+                neighbors += 1;
+                if neighbors >= NOISE_MIN_NEIGHBORS { break; }
+            }
+        }
+        keep[a] = neighbors >= NOISE_MIN_NEIGHBORS;
+    }
+    for (k, &i) in motion_idx.iter().enumerate() {
+        if !keep[k] { points[i].2 = false; }
+    }
 }
 
 fn open_pwm() -> Option<Pwm> {
@@ -306,7 +337,46 @@ fn redraw(scan: &Scan, phase: &Phase, buf: &mut Vec<u32>) {
         }
     }
 
+    let off = (cx.min(cy) - 40.0) as isize;
+    let ox = cx as isize;
+    let oy = cy as isize;
+    draw_label(buf, ox - off - 20, oy - off, "Q1", STATIC_COLOR);
+    draw_label(buf, ox - off - 20, oy + off, "Q2", STATIC_COLOR);
+    draw_label(buf, ox + off,      oy + off, "Q3", STATIC_COLOR);
+    draw_label(buf, ox + off,      oy - off, "Q4", STATIC_COLOR);
+
     fill_dot(buf, cx as isize, cy as isize, 4, ORIGIN);
+}
+
+fn draw_label(buf: &mut Vec<u32>, x: isize, y: isize, s: &str, color: u32) {
+    let mut cx = x;
+    for ch in s.chars() {
+        draw_glyph(buf, cx, y, ch, color);
+        cx += 8;
+    }
+}
+
+fn draw_glyph(buf: &mut Vec<u32>, x: isize, y: isize, ch: char, color: u32) {
+    let rows: [u8; 7] = match ch {
+        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
+        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        '2' => [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111],
+        '3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
+        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+        _   => return,
+    };
+    for (ry, row) in rows.iter().enumerate() {
+        for rx in 0..5 {
+            if row & (1 << (4 - rx)) != 0 {
+                let px = x + rx as isize;
+                let py = y + ry as isize;
+                set_px(buf, px,     py,     color);
+                set_px(buf, px + 1, py,     color);
+                set_px(buf, px,     py + 1, color);
+                set_px(buf, px + 1, py + 1, color);
+            }
+        }
+    }
 }
 
 fn blue_red_gradient(t: f64) -> u32 {
