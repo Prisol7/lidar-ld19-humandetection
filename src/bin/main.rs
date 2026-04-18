@@ -1,3 +1,4 @@
+use lidar_ld19::detect::{analyze, log_features_csv, Classifier, Cluster};
 use lidar_ld19::{LD19, DIR_ROUND};
 use minifb::{Key, Window, WindowOptions};
 use std::time::{Duration, Instant};
@@ -12,12 +13,23 @@ const ANGLE_BINS: usize = 360;
 const MATCH_TOLERANCE_M: f64 = 0.15;
 const MIN_BG_SAMPLES: u32 = 5;
 
-const BG_COLOR: u32 = 0x00_0a_0a_0a;
-const GRID: u32 = 0x00_1a_2a_1a;
-const STATIC_COLOR: u32 = 0x00_ff_ff_ff;
+const MODEL_PATH: &str = "human_rf.bin";
+const TRAINING_CSV: &str = "training_data.csv";
+
+// FIXME: replace this crude nearest-centroid sticky-tracker with a proper
+// multi-object tracker (e.g. Kalman filter + Hungarian assignment, or SORT).
+// Today a cluster that was ever classified human stays "human" as long as
+// *any* cluster keeps appearing within TRACK_MATCH_M of its last centroid,
+// which will happily latch onto a different object that wanders through.
+const TRACK_MATCH_M: f64 = 0.40;
+const TRACK_TTL_SCANS: u32 = 30;
+
+const BG_COLOR: u32 = 0x00_ff_ff_ff;
+const GRID: u32 = 0x00_d0_d0_d0;
+const STATIC_COLOR: u32 = 0x00_00_00_00;
 const MOTION_COLOR: u32 = 0x00_ff_30_30;
-const ORIGIN: u32 = 0x00_ff_ff_00;
-const CAL_COLOR: u32 = 0x00_00_c8_ff;
+const ORIGIN: u32 = 0x00_c0_a0_00;
+const CAL_COLOR: u32 = 0x00_00_80_c8;
 
 enum Phase {
     Calibrating { started: Instant, samples: Vec<Vec<f64>> },
@@ -26,6 +38,12 @@ enum Phase {
 
 struct Scan {
     points: Vec<(f64, f64, bool)>,
+    clusters: Vec<Cluster>,
+}
+
+struct HumanTrack {
+    centroid: (f64, f64),
+    missed: u32,
 }
 
 fn main() {
@@ -49,8 +67,13 @@ fn main() {
     window.set_target_fps(20);
 
     let mut buf = vec![BG_COLOR; WIDTH * HEIGHT];
-    let mut scan = Scan { points: Vec::with_capacity(500) };
+    let mut scan = Scan {
+        points: Vec::with_capacity(500),
+        clusters: Vec::new(),
+    };
     let mut last_dir: u16 = u16::MAX;
+    let classifier = Classifier::load_or_fallback(MODEL_PATH);
+    let mut tracks: Vec<HumanTrack> = Vec::new();
 
     let mut phase = Phase::Calibrating {
         started: Instant::now(),
@@ -68,6 +91,20 @@ fn main() {
 
             if wrapped {
                 phase = maybe_finish_calibration(phase);
+                if matches!(phase, Phase::Detecting { .. }) {
+                    let foreground: Vec<(f64, f64)> = scan
+                        .points
+                        .iter()
+                        .filter(|p| p.2)
+                        .map(|p| (p.0, p.1))
+                        .collect();
+                    scan.clusters = analyze(&foreground, &classifier);
+                    log_features_csv(TRAINING_CSV, &scan.clusters);
+                    update_tracks(&mut tracks, &mut scan.clusters);
+                } else {
+                    scan.clusters.clear();
+                    tracks.clear();
+                }
                 redraw(&scan, &phase, &mut buf);
                 window.update_with_buffer(&buf, WIDTH, HEIGHT).unwrap();
                 scan.points.clear();
@@ -93,6 +130,49 @@ fn main() {
                 },
             };
             scan.points.push((x, y, is_motion));
+        }
+    }
+}
+
+// FIXME: crude "once human, always human" sticky tracker — see comment at the
+// top of this file. Swap for a real tracker when we care about correctness.
+fn update_tracks(tracks: &mut Vec<HumanTrack>, clusters: &mut [Cluster]) {
+    let mut matched_track = vec![false; tracks.len()];
+
+    for c in clusters.iter_mut() {
+        let mut best: Option<(usize, f64)> = None;
+        for (ti, t) in tracks.iter().enumerate() {
+            if matched_track[ti] {
+                continue;
+            }
+            let dx = c.centroid.0 - t.centroid.0;
+            let dy = c.centroid.1 - t.centroid.1;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d <= TRACK_MATCH_M && best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((ti, d));
+            }
+        }
+        if let Some((ti, _)) = best {
+            matched_track[ti] = true;
+            tracks[ti].centroid = c.centroid;
+            tracks[ti].missed = 0;
+            c.is_human = true;
+        } else if c.is_human {
+            tracks.push(HumanTrack { centroid: c.centroid, missed: 0 });
+            matched_track.push(true);
+        }
+    }
+
+    let mut i = 0;
+    while i < tracks.len() {
+        if !matched_track[i] {
+            tracks[i].missed += 1;
+        }
+        if tracks[i].missed > TRACK_TTL_SCANS {
+            tracks.swap_remove(i);
+            matched_track.swap_remove(i);
+        } else {
+            i += 1;
         }
     }
 }
@@ -150,10 +230,50 @@ fn redraw(scan: &Scan, phase: &Phase, buf: &mut Vec<u32>) {
                     plot(buf, cx, cy, scale, x, y, 3, MOTION_COLOR);
                 }
             }
+            for cluster in &scan.clusters {
+                if !cluster.is_human {
+                    continue;
+                }
+                let (hx, hy) = cluster.centroid;
+                let max_d = cluster
+                    .points
+                    .iter()
+                    .map(|&(x, y)| ((x - hx).powi(2) + (y - hy).powi(2)).sqrt())
+                    .fold(0.0_f64, f64::max)
+                    .max(1e-6);
+                for &(x, y) in &cluster.points {
+                    let d = ((x - hx).powi(2) + (y - hy).powi(2)).sqrt();
+                    let t = (d / max_d).clamp(0.0, 1.0);
+                    plot(buf, cx, cy, scale, x, y, 3, blue_red_gradient(t));
+                }
+                let px = (cx + hx * scale).round() as isize;
+                let py = (cy - hy * scale).round() as isize;
+                draw_smile(buf, px, py - 18, blue_red_gradient(0.0));
+            }
         }
     }
 
     fill_dot(buf, cx as isize, cy as isize, 4, ORIGIN);
+}
+
+fn blue_red_gradient(t: f64) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let r = (t * 255.0).round() as u32;
+    let b = ((1.0 - t) * 255.0).round() as u32;
+    (r << 16) | b
+}
+
+fn draw_smile(buf: &mut Vec<u32>, cx: isize, cy: isize, color: u32) {
+    draw_circle(buf, cx, cy, 10, color);
+    fill_dot(buf, cx - 4, cy - 3, 1, color);
+    fill_dot(buf, cx + 4, cy - 3, 1, color);
+    for i in -4..=4 {
+        let a = (i as f64) * 0.22 + std::f64::consts::FRAC_PI_2;
+        let x = cx + (a.cos() * 5.0).round() as isize;
+        let y = cy + (a.sin() * 5.0).round() as isize;
+        set_px(buf, x, y, color);
+        set_px(buf, x + 1, y, color);
+    }
 }
 
 fn plot(buf: &mut Vec<u32>, cx: f64, cy: f64, scale: f64, x: f64, y: f64, r: isize, color: u32) {

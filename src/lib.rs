@@ -4,6 +4,8 @@ use std::time::Duration;
 mod port_buffer;
 use port_buffer::PortBuffer;
 
+pub mod detect;
+
 pub const DIR_ROUND: u16 = 36000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

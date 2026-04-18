@@ -1,0 +1,8 @@
+target/
+.git/
+.claude/
+.vscode/
+.idea/
+*.log
+training_data.csv
+human_rf.bin
