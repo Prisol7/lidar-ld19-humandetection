@@ -1,6 +1,7 @@
 use lidar_ld19::detect::{analyze, log_features_csv, Classifier, Cluster};
 use lidar_ld19::{LD19, DIR_ROUND};
 use minifb::{Key, Window, WindowOptions};
+use rppal::pwm::{Channel, Polarity, Pwm};
 use std::time::{Duration, Instant};
 
 const PORT: &str = "/dev/ttyUSB0";
@@ -15,6 +16,9 @@ const MIN_BG_SAMPLES: u32 = 5;
 
 const MODEL_PATH: &str = "human_rf.bin";
 const TRAINING_CSV: &str = "training_data.csv";
+
+const PWM_FREQ_HZ: f64 = 1_000.0;
+const PWM_IDLE_DUTY: f64 = 0.5;
 
 // FIXME: replace this crude nearest-centroid sticky-tracker with a proper
 // multi-object tracker 
@@ -75,6 +79,8 @@ fn main() {
     let mut last_dir: u16 = u16::MAX;
     let classifier = Classifier::load_or_fallback(MODEL_PATH);
     let mut tracks: Vec<HumanTrack> = Vec::new();
+    let pwm = open_pwm();
+    set_duty(&pwm, PWM_IDLE_DUTY);
 
     let mut phase = Phase::Calibrating {
         started: Instant::now(),
@@ -102,12 +108,18 @@ fn main() {
                     scan.clusters = analyze(&foreground, &classifier);
                     log_features_csv(TRAINING_CSV, &scan.clusters);
                     update_tracks(&mut tracks, &mut scan.clusters);
-                    if let Some(angle) = closest_human_angle(&scan.clusters) {
-                        println!("human @ {:.1}°", angle);
+                    match closest_human_angle(&scan.clusters) {
+                        Some(angle) => {
+                            let duty = angle / 180.0;
+                            set_duty(&pwm, duty);
+                            println!("human @ {:.1}°  duty {:.1}%", angle, duty * 100.0);
+                        }
+                        None => set_duty(&pwm, PWM_IDLE_DUTY),
                     }
                 } else {
                     scan.clusters.clear();
                     tracks.clear();
+                    set_duty(&pwm, PWM_IDLE_DUTY);
                 }
                 redraw(&scan, &phase, &mut buf);
                 window.update_with_buffer(&buf, WIDTH, HEIGHT).unwrap();
@@ -141,7 +153,7 @@ fn main() {
 fn closest_human_angle(clusters: &[Cluster]) -> Option<f64> {
     clusters
         .iter()
-        .filter(|c| c.is_human)
+        .filter(|c| c.is_human && c.centroid.1 >= 0.0)
         .min_by(|a, b| {
             let da = a.centroid.0.hypot(a.centroid.1);
             let db = b.centroid.0.hypot(b.centroid.1);
@@ -149,9 +161,30 @@ fn closest_human_angle(clusters: &[Cluster]) -> Option<f64> {
         })
         .map(|c| {
             let (x, y) = c.centroid;
-            let deg = y.atan2(x).to_degrees();
-            if deg < 0.0 { deg + 360.0 } else { deg }
+            y.atan2(x).to_degrees().clamp(0.0, 180.0)
         })
+}
+
+fn open_pwm() -> Option<Pwm> {
+    match Pwm::with_frequency(Channel::Pwm0, PWM_FREQ_HZ, PWM_IDLE_DUTY, Polarity::Normal, true) {
+        Ok(p) => {
+            println!("PWM on GPIO18 @ {} Hz", PWM_FREQ_HZ);
+            Some(p)
+        }
+        Err(e) => {
+            eprintln!("PWM unavailable ({e}); running without hardware output.");
+            None
+        }
+    }
+}
+
+fn set_duty(pwm: &Option<Pwm>, duty: f64) {
+    let duty = duty.clamp(0.0, 1.0);
+    if let Some(p) = pwm {
+        if let Err(e) = p.set_duty_cycle(duty) {
+            eprintln!("PWM set_duty_cycle failed: {e}");
+        }
+    }
 }
 
 // FIXME: crude "once human, always human" sticky tracker — see comment at the
