@@ -340,10 +340,10 @@ fn redraw(scan: &Scan, phase: &Phase, buf: &mut Vec<u32>) {
     let off = (cx.min(cy) - 40.0) as isize;
     let ox = cx as isize;
     let oy = cy as isize;
-    draw_label(buf, ox - off - 20, oy - off, "Q1", STATIC_COLOR);
-    draw_label(buf, ox - off - 20, oy + off, "Q2", STATIC_COLOR);
-    draw_label(buf, ox + off,      oy + off, "Q3", STATIC_COLOR);
-    draw_label(buf, ox + off,      oy - off, "Q4", STATIC_COLOR);
+    draw_label(buf, ox + off,      oy - off, "Q1", STATIC_COLOR);
+    draw_label(buf, ox - off - 20, oy - off, "Q2", STATIC_COLOR);
+    draw_label(buf, ox - off - 20, oy + off, "Q3", STATIC_COLOR);
+    draw_label(buf, ox + off,      oy + off, "Q4", STATIC_COLOR);
 
     fill_dot(buf, cx as isize, cy as isize, 4, ORIGIN);
 }
